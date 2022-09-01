@@ -2,6 +2,8 @@ package grpcpool
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,9 +22,9 @@ var (
 	ErrConnShutdown   = errors.New("grpc conn shutdown")
 
 	defaultClientPoolCap    = 5
-	defaultDialTimeout      = 5 * time.Second
-	defaultKeepAlive        = 30 * time.Second
-	defaultKeepAliveTimeout = 10 * time.Second
+	defaultDialTimeout      = time.Second * 5
+	defaultKeepAlive        = time.Second * 30
+	defaultKeepAliveTimeout = time.Second * 10
 )
 
 type ClientOption struct {
@@ -105,6 +107,7 @@ func (cc *ClientPool) getConn() (*grpc.ClientConn, error) {
 
 	conn, err = cc.connect()
 	if err != nil {
+		log.Printf("[err] connect: %v", err)
 		return nil, err
 	}
 
@@ -123,6 +126,7 @@ func (cc *ClientPool) connect() (*grpc.ClientConn, error) {
 		),
 	)
 	if err != nil {
+		log.Printf("[err] connect: %v", err)
 		return nil, err
 	}
 
@@ -144,6 +148,12 @@ func (cc *ClientPool) Close() {
 
 type TargetServiceNames struct {
 	m map[string][]string
+}
+
+func NewTargetServiceNames() *TargetServiceNames {
+	return &TargetServiceNames{
+		m: make(map[string][]string),
+	}
 }
 
 func (h *TargetServiceNames) Set(target string, serviceNames ...string) {
@@ -184,12 +194,6 @@ func NewServiceClientPool(option *ClientOption) *ServiceClientPool {
 	}
 }
 
-func NewTargetServiceNames() *TargetServiceNames {
-	return &TargetServiceNames{
-		m: make(map[string][]string),
-	}
-}
-
 func (sc *ServiceClientPool) Init(m TargetServiceNames) {
 
 	var (
@@ -218,6 +222,7 @@ func (sc *ServiceClientPool) GetClientWithFullMethod(fullMethod string) (*grpc.C
 func (sc *ServiceClientPool) GetClient(name string) (*grpc.ClientConn, error) {
 	cc, ok := sc.clients[name]
 	if !ok {
+		log.Print("[err] GetClient: not found client")
 		return nil, ErrNotFoundClient
 	}
 
@@ -245,16 +250,19 @@ func (sc *ServiceClientPool) CloseAll() {
 }
 
 func (sc *ServiceClientPool) ExtractServiceName(fullMethod string) string {
-	var (
-		sm []string
-	)
-
-	sm = strings.Split(fullMethod, "/")
+	sm := strings.Split(fullMethod, "/")
 	if len(sm) != 3 {
 		return ""
 	}
-
 	return "/" + sm[1]
+}
+
+func (sc *ServiceClientPool) GetMethodURI(fullMethod string) string {
+	sm := strings.Split(fullMethod, "/")
+	if len(sm) != 3 {
+		return ""
+	}
+	return fmt.Sprintf("/%s/%s", sm[1], sm[2])
 }
 
 func (sc *ServiceClientPool) Invoke(ctx context.Context, fullMethod string, headers map[string]string, args interface{}, reply interface{}, opts ...grpc.CallOption) error {
@@ -265,6 +273,7 @@ func (sc *ServiceClientPool) Invoke(ctx context.Context, fullMethod string, head
 	name := sc.ExtractServiceName(fullMethod)
 	conn, err := sc.GetClient(name)
 	if err != nil {
+		log.Printf("[err] GetClient: %v", err)
 		return err
 	}
 
@@ -280,5 +289,12 @@ func (sc *ServiceClientPool) Invoke(ctx context.Context, fullMethod string, head
 	}
 
 	ctx = metadata.NewOutgoingContext(ctx, md)
-	return conn.Invoke(ctx, fullMethod, args, reply, opts...)
+	methodURI := sc.GetMethodURI(fullMethod)
+	err = conn.Invoke(ctx, methodURI, args, reply, opts...)
+	if err != nil {
+		log.Printf("[err] Invoke: %v", err)
+		return err
+	}
+
+	return nil
 }
